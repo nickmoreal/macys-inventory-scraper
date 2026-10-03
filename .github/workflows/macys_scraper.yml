@@ -1,0 +1,43 @@
+name: Macy's Inventory Scraper
+
+on:
+  schedule:
+    # 4:00 PM IST (10:30 UTC) and 10:00 PM IST (16:30 UTC) daily
+    - cron: '30 10,16 * * *'
+  workflow_dispatch:
+
+jobs:
+  scrape-and-sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Macy's Scraper
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+          PROXY_URL: ${{ secrets.PROXY_URL }}
+        run: |
+          python scraper.py
+
+      - name: Save CSV Artifact to GitHub
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macys-inventory-output
+          path: Macys_Inventory_Output.csv
+          retention-days: 7
