@@ -1,0 +1,355 @@
+import pandas as pd
+import time
+import re
+import os
+from curl_cffi import requests
+
+OUTPUT_FILE = "Macys_Inventory_Output.csv"
+CHUNK_SIZE = 25
+
+# True = debug columns aayenge
+# False = final clean output
+DEBUG_MODE = True
+
+
+def normalize_upc(upc):
+    upc = str(upc or "").strip()
+    upc = re.sub(r"\D", "", upc)
+    if len(upc) < 12:
+        return upc.zfill(12)
+    elif len(upc) > 12:
+        return upc[-12:]
+    return upc
+
+
+def digits_only(value):
+    return re.sub(r"\D", "", str(value or "").strip())
+
+
+def norm_text(value):
+    return re.sub(r"\s+", " ", str(value or "").strip()).lower()
+
+
+def extract_product_id(url):
+    match = re.search(r'ID=(\d+)', str(url))
+    return match.group(1) if match else None
+
+
+def save_chunk(data):
+    df = pd.DataFrame(data)
+    if not os.path.exists(OUTPUT_FILE):
+        df.to_csv(OUTPUT_FILE, index=False)
+    else:
+        df.to_csv(OUTPUT_FILE, mode='a', index=False, header=False)
+
+
+def pick_prices_from_tiered(tiered):
+    regular_price = "0"
+    discount_price = "0"
+
+    for t in tiered or []:
+        label = norm_text(t.get("label", ""))
+        values = t.get("values", [])
+        if not values:
+            continue
+
+        first = values[0]
+        value = str(first.get("value", "0"))
+        value_type = norm_text(first.get("type", ""))
+
+        if value_type == "regular" or "orig" in label or "reg" in label or "regular" in label:
+            regular_price = value
+
+        if value_type == "discount" or "sale" in label or "now" in label or "discount" in label:
+            discount_price = value
+
+    return regular_price, discount_price
+
+
+def get_fallback_prices(product_data):
+    regular_price = "0"
+    discount_price = "0"
+    offer_price = "0"
+
+    try:
+        colors = product_data.get("traits", {}).get("colors", {}).get("colorMap", {})
+        for c in colors.values():
+            pricing = c.get("pricing", {}).get("price", {})
+            tiered = pricing.get("tieredPrice", [])
+
+            r, d = pick_prices_from_tiered(tiered)
+            if r != "0" and regular_price == "0":
+                regular_price = r
+            if d != "0" and discount_price == "0":
+                discount_price = d
+
+            final_price = pricing.get("finalPrice", {})
+            if isinstance(final_price, dict):
+                vals = final_price.get("values", [])
+                if vals and offer_price == "0":
+                    offer_price = str(vals[0].get("value", "0"))
+    except:
+        pass
+
+    try:
+        price = product_data.get("price", {})
+        if regular_price == "0" and "regularPrice" in price:
+            regular_price = str(price["regularPrice"])
+        if discount_price == "0" and "salePrice" in price:
+            discount_price = str(price["salePrice"])
+
+        final_price = price.get("finalPrice", {})
+        if isinstance(final_price, dict):
+            vals = final_price.get("values", [])
+            if vals and offer_price == "0":
+                offer_price = str(vals[0].get("value", "0"))
+    except:
+        pass
+
+    return regular_price, discount_price, offer_price
+
+
+def get_product_mkt_data(full_json, product_data):
+    if isinstance(full_json, dict):
+        pmd = full_json.get("productMktData")
+        if isinstance(pmd, dict):
+            return pmd
+
+        products = full_json.get("product", [])
+        if products and isinstance(products, list):
+            maybe = products[0].get("productMktData")
+            if isinstance(maybe, dict):
+                return maybe
+
+    if isinstance(product_data, dict):
+        pmd = product_data.get("productMktData")
+        if isinstance(pmd, dict):
+            return pmd
+
+    return {}
+
+
+def get_offer_price_from_product_mkt(product_mkt_data, row_upc, row_sku=""):
+    offers = product_mkt_data.get("offers", [])
+    row_upc_norm = normalize_upc(row_upc)
+    row_sku_digits = digits_only(row_sku)
+
+    # 1) Exact SKU digits match
+    if row_sku_digits:
+        for offer in offers:
+            offer_sku = str(offer.get("SKU", "")).strip()
+            offer_digits = digits_only(offer_sku)
+            offer_price = offer.get("price", None)
+
+            if not offer_price:
+                continue
+
+            if offer_digits == row_sku_digits:
+                return str(offer_price), offer, "offer_exact_sku"
+
+    # 2) Exact UPC(12) match with offer SKU digits
+    for offer in offers:
+        offer_sku = str(offer.get("SKU", "")).strip()
+        offer_digits = digits_only(offer_sku)
+        offer_upc_norm = normalize_upc(offer_digits)
+        offer_price = offer.get("price", None)
+
+        if not offer_price:
+            continue
+
+        if offer_upc_norm == row_upc_norm:
+            return str(offer_price), offer, "offer_exact_upc"
+
+    # 3) Last 10 digits fallback
+    for offer in offers:
+        offer_sku = str(offer.get("SKU", "")).strip()
+        offer_digits = digits_only(offer_sku)
+        offer_price = offer.get("price", None)
+
+        if not offer_price:
+            continue
+
+        if offer_digits and row_upc_norm and offer_digits[-10:] == row_upc_norm[-10:]:
+            return str(offer_price), offer, "offer_last10_upc"
+
+    return None, None, "no_offer_match"
+
+
+def get_offer_stock_from_product_mkt(matched_offer):
+    if not matched_offer:
+        return None
+
+    availability = str(matched_offer.get("availability", "")).lower()
+    if "instock" in availability:
+        return "2"
+    if "outofstock" in availability:
+        return "0"
+    return None
+
+
+def resolve_row_price(product_mkt_data, product_data, row_upc, row_sku=""):
+    regular_price, discount_price, fallback_offer_price = get_fallback_prices(product_data)
+
+    offer_price, matched_offer, match_type = get_offer_price_from_product_mkt(
+        product_mkt_data, row_upc, row_sku
+    )
+
+    if offer_price is not None:
+        return {
+            "RegularPrice": regular_price,
+            "DiscountPrice": discount_price,
+            "OfferPrice": offer_price,
+            "MatchedOffer": matched_offer,
+            "PriceSource": match_type
+        }
+
+    if fallback_offer_price != "0":
+        return {
+            "RegularPrice": regular_price,
+            "DiscountPrice": discount_price,
+            "OfferPrice": fallback_offer_price,
+            "MatchedOffer": None,
+            "PriceSource": "fallback_finalPrice"
+        }
+
+    if discount_price != "0":
+        return {
+            "RegularPrice": regular_price,
+            "DiscountPrice": discount_price,
+            "OfferPrice": discount_price,
+            "MatchedOffer": None,
+            "PriceSource": "fallback_discount"
+        }
+
+    return {
+        "RegularPrice": regular_price,
+        "DiscountPrice": discount_price,
+        "OfferPrice": regular_price,
+        "MatchedOffer": None,
+        "PriceSource": "fallback_regular"
+    }
+
+
+def scrape_inventory(input_file):
+    df = pd.read_excel(input_file)
+    df = df.sort_values(by="URL")
+    grouped = df.groupby("URL")
+
+    unique_urls = list(grouped.groups.keys())
+    total_urls = len(unique_urls)
+    print(f"🌐 Total URLs: {total_urls}")
+
+    results = []
+    session = requests.Session(impersonate="chrome110")
+
+    headers = {
+        "accept": "application/json,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "referer": "https://www.macys.com/",
+        "user-agent": "Mozilla/5.0"
+    }
+
+    for i, url in enumerate(unique_urls, 1):
+        if i % 100 == 0:
+            session = requests.Session(impersonate="chrome110")
+            print("🔄 Session refreshed")
+
+        percent = round((i / total_urls) * 100, 2)
+        remaining = total_urls - i
+        print(f"\n🌐 {i}/{total_urls} ({percent}%) | Remaining: {remaining}")
+
+        product_id = extract_product_id(url)
+        if not product_id:
+            print("⚠ Product ID not found")
+            continue
+
+        api_url = f"https://www.macys.com/xapi/digital/v1/product/{product_id}"
+
+        success = False
+        res = None
+
+        for _ in range(3):
+            try:
+                res = session.get(api_url, headers=headers, timeout=30)
+                if res.status_code == 200:
+                    success = True
+                    break
+            except:
+                pass
+            time.sleep(1)
+
+        if not success or res is None:
+            print("❌ API failed")
+            continue
+
+        try:
+            full_json = res.json()
+            product_data = full_json["product"][0]
+        except:
+            print("❌ JSON parse failed")
+            continue
+
+        product_mkt_data = get_product_mkt_data(full_json, product_data)
+        subset = grouped.get_group(url)
+        upcs = product_data.get("relationships", {}).get("upcs", {})
+
+        time.sleep(0.35)
+
+        for _, row in subset.iterrows():
+            upc = normalize_upc(row["UPC"])
+            sku = str(row["SKU"]).strip() if "SKU" in row.index else ""
+
+            final_stock = "0"
+
+            # Existing stock logic safe
+            for info in upcs.values():
+                api_upc = normalize_upc(info.get("identifier", {}).get("upcNumber", ""))
+                if api_upc and api_upc == upc:
+                    final_stock = "2" if info.get("availability", {}).get("available") else "0"
+                    break
+
+            price_info = resolve_row_price(product_mkt_data, product_data, upc, sku)
+            matched_offer = price_info["MatchedOffer"]
+
+            # Offer-based stock override if matched offer exists
+            offer_stock = get_offer_stock_from_product_mkt(matched_offer)
+            if offer_stock is not None:
+                final_stock = offer_stock
+
+            result_row = {
+                "SKU": sku,
+                "UPC": upc,
+                "URL": url,
+                "RegularPrice": price_info["RegularPrice"],
+                "DiscountPrice": price_info["DiscountPrice"],
+                "OfferPrice": price_info["OfferPrice"],
+                "Stock": final_stock
+            }
+
+            if DEBUG_MODE:
+                result_row.update({
+                    "PriceSource": price_info["PriceSource"],
+                    "MatchedOfferSKU": matched_offer.get("SKU", "") if matched_offer else "",
+                    "MatchedColor": matched_offer.get("itemOffered", {}).get("color", "") if matched_offer else "",
+                    "MatchedSize": matched_offer.get("itemOffered", {}).get("size", "") if matched_offer else ""
+                })
+
+            results.append(result_row)
+
+        if len(results) >= CHUNK_SIZE:
+            save_chunk(results)
+            results.clear()
+            print("💾 Saved chunk")
+
+    return results
+
+
+if __name__ == "__main__":
+    if os.path.exists(OUTPUT_FILE):
+        os.remove(OUTPUT_FILE)
+
+    results = scrape_inventory("Macys_URLS.xlsx")
+
+    if results:
+        save_chunk(results)
+
+    print("\n✅ Done! Stable Macy's variant price scraper")
