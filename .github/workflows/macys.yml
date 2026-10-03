@@ -1,0 +1,48 @@
+name: Macys Inventory Automation
+
+on:
+  schedule:
+    # 4:00 PM IST
+    - cron: "0 16 * * *"
+      timezone: "Asia/Kolkata"
+
+    # 10:00 PM IST
+    - cron: "0 22 * * *"
+      timezone: "Asia/Kolkata"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Macy's scraper
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          GOOGLE_SHEET_NAME: ${{ secrets.GOOGLE_SHEET_NAME }}
+          GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+          INPUT_FILE: "Macys_URLS.xlsx"
+          CHUNK_SIZE: "25"
+          DEBUG_MODE: "true"
+        run: |
+          python scraper.py
