@@ -2,10 +2,9 @@ name: Macy's Inventory Scraper
 
 on:
   schedule:
-    # 4:00 PM IST (10:30 UTC) and 10:00 PM IST (16:30 UTC) daily
-    - cron: '30 10,16 * * *'
+    - cron: '35 10 * * *'   # 4:05 PM IST (10:35 UTC)
+    - cron: '35 16 * * *'   # 10:05 PM IST (16:35 UTC)
   workflow_dispatch:
-
 jobs:
   scrape-and-sync:
     runs-on: ubuntu-latest
