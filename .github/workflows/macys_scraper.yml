@@ -2,8 +2,8 @@ name: Macy's Inventory Scraper
 
 on:
   schedule:
-    - cron: '30 14 * * *'   # 8:00 PM IST (14:30 UTC)
-    - cron: '35 14 * * *'   # 8:05 PM IST (14:35 UTC) - Backup trigger
+    - cron: '05 10 * * *'   # 3:35 PM IST (Runs and finishes by ~4:00 PM)
+    - cron: '05 16 * * *'   # 9:35 PM IST (Runs and finishes by ~10:00 PM)
   workflow_dispatch:
 jobs:
   scrape-and-sync:
