@@ -1,6 +1,6 @@
-# Macy's Inventory Automation
+# Mac Inventory Automation
 
-This project runs the Macy's inventory/price scraper automatically through GitHub Actions.
+This project runs the Mac inventory/price scraper automatically through GitHub Actions.
 
 ## Schedule
 
@@ -13,9 +13,7 @@ The workflow uses GitHub's timezone-aware schedule with `Asia/Kolkata`.
 ## Files
 
 - `scraper.py` - scraper + Google Sheets + Google Drive backup
-- `Macys_URLs.xlsx` - input Excel file
 - `requirements.txt` - Python dependencies
-- `.github/workflows/macys.yml` - automation schedule
 
 ## Input Excel
 
@@ -42,9 +40,6 @@ PriceSource, MatchedOfferSKU, MatchedColor, MatchedSize
 
 For each run, one CSV file is created in the configured Google Drive folder.
 
-Example:
-
-`Macys_Inventory_20261003_160000.csv`
 
 The same CSV is updated after every 25-row chunk.
 
